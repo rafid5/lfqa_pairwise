@@ -1,0 +1,5 @@
+bge_reranker_lfqa/
+data/
+.vs/
+__pycache__/
+.env
