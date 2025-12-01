@@ -14,23 +14,7 @@ from transformers import (
 
 
 class LongformerRerankerTrainer:
-    """
-    Fine-tune Longformer (long context) as a cross-encoder reranker
-    on pairwise human preference data.
 
-    Each JSON line in train/dev/test is expected to have:
-      - question_text
-      - answer_1
-      - answer_2
-      - human_judgment: "answer_1", "answer_2", or "tie"
-
-    We expand each pair to two pointwise examples:
-      - (question_text, preferred_answer, label=1)
-      - (question_text, other_answer,    label=0)
-
-    Then we evaluate at the pairwise level:
-      - Does model(q, a1) vs model(q, a2) match human_judgment?
-    """
 
     def __init__(
         self,
@@ -38,7 +22,7 @@ class LongformerRerankerTrainer:
         dev_path: str,
         test_path: str,
         model_name: str = "allenai/longformer-base-4096",
-        max_length: int = 4096,  # >1024, safe starting point for 8GB
+        max_length: int = 4096,  # adjust context length as needed
         output_dir: str = "./longformer_reranker_lfqa",
     ):
         self.train_path = train_path
@@ -48,7 +32,7 @@ class LongformerRerankerTrainer:
         self.max_length = max_length
         self.output_dir = output_dir
 
-        # ---- Tokenizer & model ----
+       # Load tokenizer
         print(f"Loading tokenizer: {self.model_name}")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=True)
 
@@ -56,7 +40,7 @@ class LongformerRerankerTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         print(f"Loading Longformer model for sequence classification: {self.model_name}")
-        # Single regression-style logit as relevance score
+        # Load model
         self.model = AutoModelForSequenceClassification.from_pretrained(
             self.model_name,
             num_labels=1,
@@ -69,10 +53,10 @@ class LongformerRerankerTrainer:
         self.train_dataset = None
         self.dev_dataset = None
 
-    # ---------- Data utilities ----------
 
     @staticmethod
     def load_jsonl(path: str) -> List[Dict]:
+        # Load a JSONL file into a list of dicts.
         data = []
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
@@ -84,12 +68,7 @@ class LongformerRerankerTrainer:
 
     @staticmethod
     def expand_pointwise(samples: List[Dict]) -> List[Dict]:
-        """
-        Convert each pairwise question into two pointwise items:
-          - (q, preferred_answer, label=1)
-          - (q, other_answer,     label=0)
-        Assumes 'human_judgment' is either 'answer_1' or 'answer_2'.
-        """
+        # Convert pairwise samples into pointwise format
         rows = []
         for ex in samples:
             q = ex["question_text"]
@@ -108,11 +87,12 @@ class LongformerRerankerTrainer:
         return rows
 
     def load_all_splits(self) -> None:
+        # Load all data splits and filter out ties
         raw_train = self.load_jsonl(self.train_path)
         raw_dev   = self.load_jsonl(self.dev_path)
         raw_test  = self.load_jsonl(self.test_path)
 
-        # Filter out 'tie'
+        
         self.train_samples = [
             ex for ex in raw_train
             if ex.get("human_judgment") in ("answer_1", "answer_2")
@@ -131,11 +111,7 @@ class LongformerRerankerTrainer:
         print(f"Test samples  (no tie): {len(self.test_samples)} / {len(raw_test)}")
 
     def prepare_datasets(self) -> None:
-        """
-        Build HuggingFace Datasets for train/dev with tokenization.
-        Longformer needs a global_attention_mask; we'll set CLS token as global.
-        """
-
+        # Prepare HuggingFace datasets for training and evaluation
         def tokenize_batch(batch):
             enc = self.tokenizer(
                 batch["query"],
@@ -175,16 +151,17 @@ class LongformerRerankerTrainer:
         self.train_dataset = train_ds
         self.dev_dataset = dev_ds
 
-    # ---------- Training ----------
+    
 
     @staticmethod
     def compute_metrics(eval_pred) -> Dict[str, float]:
+        # Compute evaluation metrics
         logits, labels = eval_pred
-        # logits: (N, 1)
+       
         scores = logits.squeeze(-1)
         labels = labels.astype(int)
 
-        # Threshold at 0.0 (compatible with BCEWithLogitsLoss)
+        
         preds = (scores > 0.0).astype(int)
 
         acc = accuracy_score(labels, preds)
@@ -199,6 +176,7 @@ class LongformerRerankerTrainer:
         }
 
     def train(self, num_train_epochs: int = 1, lr: float = 5e-5, batch_size: int = 1):
+        # Train the Longformer reranker model
         use_fp16 = torch.cuda.is_available()
 
         training_args = TrainingArguments(
@@ -209,7 +187,7 @@ class LongformerRerankerTrainer:
             per_device_eval_batch_size=batch_size,
             num_train_epochs=num_train_epochs,
             logging_steps=20,
-            fp16=use_fp16,  # if this crashes, set to False
+            fp16=use_fp16,  
         )
 
         trainer = Trainer(
@@ -233,17 +211,10 @@ class LongformerRerankerTrainer:
         trainer.save_model(self.output_dir)
         self.tokenizer.save_pretrained(self.output_dir)
 
-    # ---------- Pairwise Evaluation ----------
+  
 
     def evaluate_pairwise(self) -> Tuple[float, float, float, float]:
-        """
-        Evaluate on original pairwise task:
-          For each question, does the model pick the same answer
-          as human_judgment?
-
-        We compute accuracy, precision, recall, F1 with "answer_2"
-        treated as the positive class (1), same as your BGE script.
-        """
+        # Evaluate the model on the test set in a pairwise manner
         self.model.eval()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Evaluation device:", device)
@@ -305,7 +276,7 @@ class LongformerRerankerTrainer:
         precision, recall, f1, _ = precision_recall_fscore_support(
             y_true, y_pred, average="binary", zero_division=0
         )
-
+        # PRINT RESULTS
         print("\n=== Pairwise Evaluation on Test Set ===")
         print(f"Accuracy : {acc:.4f}")
         print(f"Precision: {precision:.4f}")
@@ -316,29 +287,29 @@ class LongformerRerankerTrainer:
 
 
 def main():
-    # 🔁 Change to your actual files
+    # Define file paths
     train_path = r"F:\PhD\Long form research question\Final Dataset\sample\LFQA-HP-1M_sample_train.jsonl"
     dev_path   = r"F:\PhD\Long form research question\Final Dataset\sample\LFQA-HP-1M_sample_dev.jsonl"
     test_path  = r"F:\PhD\Long form research question\Final Dataset\sample\LFQA-HP-1M_sample_test.jsonl"
-
+    # Initialize trainer
     trainer = LongformerRerankerTrainer(
         train_path=train_path,
         dev_path=dev_path,
         test_path=test_path,
         model_name="allenai/longformer-base-4096",
-        max_length=4096,  # >1024, adjust upward if VRAM allows
+        max_length=4096,  
         output_dir="./longformer_reranker_lfqa",
     )
-
+    # Load data and prepare datasets
     trainer.load_all_splits()
     trainer.prepare_datasets()
 
     trainer.train(
         num_train_epochs=1,
         lr=5e-5,
-        batch_size=1,  # start at 1 for safety
+        batch_size=1,  
     )
-
+    # Evaluate on test set
     trainer.evaluate_pairwise()
 
 

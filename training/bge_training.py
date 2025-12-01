@@ -13,17 +13,8 @@ from transformers import (
     Trainer,
 )
 
-
 class PairwiseRerankerTrainer:
-    """
-    Fine-tune a cross-encoder reranker on pairwise human preference data.
 
-    Each JSON line in train/dev/test is expected to have:
-      - question_text
-      - answer_1
-      - answer_2
-      - human_judgment: "answer_1" or "answer_2"
-    """
 
     def __init__(
         self,
@@ -43,7 +34,7 @@ class PairwiseRerankerTrainer:
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 
-        # Single regression-style logit as relevance score
+        
         self.model = AutoModelForSequenceClassification.from_pretrained(
             self.model_name,
             num_labels=1,
@@ -56,10 +47,11 @@ class PairwiseRerankerTrainer:
         self.train_dataset = None
         self.dev_dataset = None
 
-    # ---------- Data utilities ----------
+   
 
     @staticmethod
     def load_jsonl(path: str) -> List[Dict]:
+        # Load a JSONL file into a list of dicts.
         data = []
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
@@ -71,11 +63,7 @@ class PairwiseRerankerTrainer:
 
     @staticmethod
     def expand_pointwise(samples: List[Dict]) -> List[Dict]:
-        """
-        Convert each pairwise question into two pointwise items:
-          - (q, preferred_answer, label=1)
-          - (q, other_answer, label=0)
-        """
+        # Expand pairwise samples into pointwise format.
         rows = []
         for ex in samples:
             q = ex["question_text"]
@@ -88,19 +76,21 @@ class PairwiseRerankerTrainer:
             else:
                 pos, neg = a2, a1
 
-            # positive pair
+            
             rows.append({"query": q, "doc": pos, "label": 1.0})
-            # negative pair
+            
             rows.append({"query": q, "doc": neg, "label": 0.0})
 
         return rows
 
     def load_all_splits(self) -> None:
+        # Load and filter all data splits.
+
         raw_train = self.load_jsonl(self.train_path)
         raw_dev   = self.load_jsonl(self.dev_path)
         raw_test  = self.load_jsonl(self.test_path)
 
-        # Keep only samples where human_judgment is NOT 'tie'
+     
         self.train_samples = [
             ex for ex in raw_train
             if ex.get("human_judgment") in ("answer_1", "answer_2")
@@ -119,9 +109,7 @@ class PairwiseRerankerTrainer:
         print(f"Test samples  (no tie): {len(self.test_samples)} / {len(raw_test)}")
 
     def prepare_datasets(self) -> None:
-        """
-        Build HuggingFace Datasets for train/dev with tokenization.
-        """
+        # Prepare HuggingFace datasets for training and evaluation.
 
         def tokenize_batch(batch):
             enc = self.tokenizer(
@@ -153,16 +141,17 @@ class PairwiseRerankerTrainer:
         self.train_dataset = train_ds
         self.dev_dataset = dev_ds
 
-    # ---------- Training ----------
+
 
     @staticmethod
     def compute_metrics(eval_pred) -> Dict[str, float]:
+        # Compute evaluation metrics.
         logits, labels = eval_pred
-        # logits: (N, 1)
+        
         scores = logits.squeeze(-1)
         labels = labels.astype(int)
 
-        # Threshold at 0.0 (compatible with BCEWithLogitsLoss)
+        
         preds = (scores > 0.0).astype(int)
 
         acc = accuracy_score(labels, preds)
@@ -177,9 +166,11 @@ class PairwiseRerankerTrainer:
         }
 
     def train(self, num_train_epochs: int = 2, lr: float = 2e-5, batch_size: int = 2):
+
+        # Determine if FP16 training is possible
         use_fp16 = torch.cuda.is_available()
 
-        # Older transformers: keep only the basic, supported arguments
+        # Set up training arguments
         training_args = TrainingArguments(
             output_dir=self.output_dir,
             overwrite_output_dir=True,
@@ -188,42 +179,36 @@ class PairwiseRerankerTrainer:
             per_device_eval_batch_size=batch_size * 2,
             num_train_epochs=num_train_epochs,
             logging_steps=50,
-            fp16=use_fp16,  # if this causes an error, just delete this line
+            fp16=use_fp16,  
         )
 
+        # Initialize Trainer
         trainer = Trainer(
             model=self.model,
             args=training_args,
             train_dataset=self.train_dataset,
-            eval_dataset=self.dev_dataset,   # used when you call trainer.evaluate()
+            eval_dataset=self.dev_dataset,   
             compute_metrics=self.compute_metrics,
         )
 
-        # Train on train_dataset
+        
         trainer.train()
 
-        # Optional: evaluate once on the dev set at the end
+        # Evaluate on dev set
         print("\n=== Dev set evaluation (end of training) ===")
         dev_metrics = trainer.evaluate()
         for k, v in dev_metrics.items():
             print(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
 
-        # Save final model + tokenizer
+       
         trainer.save_model(self.output_dir)
         self.tokenizer.save_pretrained(self.output_dir)
 
 
-    # ---------- Evaluation at the pairwise level ----------
+    
 
     def evaluate_pairwise(self) -> Tuple[float, float, float, float]:
-        """
-        Evaluate on original pairwise task:
-          For each question, does the model pick the same answer
-          as human_judgment?
-
-        We compute accuracy, precision, recall, F1 with "answer_2"
-        treated as the positive class (1).
-        """
+        # Evaluate the model on the test set in a pairwise manner.
         self.model.eval()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(device)
@@ -262,7 +247,7 @@ class PairwiseRerankerTrainer:
                 pred_label = "answer_1" if score_1 > score_2 else "answer_2"
                 true_label = ex["human_judgment"]
 
-                # Encode "answer_2" as positive class (1)
+                
                 y_pred.append(1 if pred_label == "answer_2" else 0)
                 y_true.append(1 if true_label == "answer_2" else 0)
 
@@ -273,7 +258,7 @@ class PairwiseRerankerTrainer:
         precision, recall, f1, _ = precision_recall_fscore_support(
             y_true, y_pred, average="binary", zero_division=0
         )
-
+        # Print results
         print("\n=== Pairwise Evaluation on Test Set ===")
         print(f"Accuracy : {acc:.4f}")
         print(f"Precision: {precision:.4f}")
@@ -284,11 +269,12 @@ class PairwiseRerankerTrainer:
 
 
 def main():
-    # 🔁 Change these paths to your actual files
+    # Adjust paths as needed
     train_path = r"F:\PhD\Long form research question\Final Dataset\sample\LFQA-HP-1M_sample_train.jsonl"
     dev_path   = r"F:\PhD\Long form research question\Final Dataset\sample\LFQA-HP-1M_sample_dev.jsonl"
     test_path  = r"F:\PhD\Long form research question\Final Dataset\sample\LFQA-HP-1M_sample_test.jsonl"
 
+    # Initialize trainer
     trainer = PairwiseRerankerTrainer(
         train_path=train_path,
         dev_path=dev_path,
@@ -298,20 +284,20 @@ def main():
         output_dir="./bge_reranker_lfqa",
     )
 
-    # 1) Load data from the 3 jsonl files
+    # Load data
     trainer.load_all_splits()
 
-    # 2) Build tokenized HF datasets
+    # Build datasets
     trainer.prepare_datasets()
 
-    # 3) Train
+    # Train the model
     trainer.train(
         num_train_epochs=2,
         lr=2e-5,
-        batch_size=2,  # adjust if you have more VRAM
+        batch_size=2,  
     )
 
-    # 4) Evaluate on pairwise test set
+    # Evaluate on test set
     trainer.evaluate_pairwise()
 
 
