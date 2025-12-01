@@ -6,7 +6,7 @@ import json
 from dotenv import load_dotenv 
 import os
 
-
+import torch
 
 
 
@@ -26,6 +26,9 @@ class Main:
             key=api_key
             
         )
+        print("CUDA available:", torch.cuda.is_available()) 
+        print("GPU count:", torch.cuda.device_count())
+        print("GPU name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "None")
 
 
 
